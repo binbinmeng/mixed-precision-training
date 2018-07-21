@@ -28,6 +28,10 @@ model_names = sorted(name for name in models.__dict__
 
 model_names.append('mobilenet')
 
+
+def str2bool(v):
+    return v.lower() in ("yes", "true", "t", "1")
+
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
@@ -65,6 +69,8 @@ parser.add_argument('--static-loss-scale', type=float, default=1,
 parser.add_argument('--dynamic-loss-scale', action='store_true',
                     help='Use dynamic loss scaling.  If supplied, this argument supersedes ' +
                     '--static-loss-scale.')
+parser.add_argument('--visdom', default=False, type=str2bool, 
+                    help='Use visdom for loss visualization')
 
 best_prec1 = 0
 
@@ -159,6 +165,10 @@ def main():
         optimizer = FP16_Optimizer(optimizer,
                                    static_loss_scale=args.static_loss_scale,
                                    dynamic_loss_scale=args.dynamic_loss_scale)
+   
+    if args.visdom:
+        import visdom
+        viz = visdom.Visdom()
 
    # optionally resume from a checkpoint
     if args.resume:
@@ -181,6 +191,12 @@ def main():
     valdir = os.path.join(args.data, 'val')
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
+    
+    if args.visdom:
+        vis_title = 'Training on ImageNet ...' 
+        vis_legend = ['Loc Loss', 'Conf Loss', 'Total Loss']
+        iter_plot = create_vis_plot('Iteration', 'Loss', vis_title, vis_legend)
+        epoch_plot = create_vis_plot('Epoch', 'Loss', vis_title, vis_legend)
 
     train_loader = torch.utils.data.DataLoader(
         datasets.ImageFolder(traindir, transforms.Compose([
@@ -206,9 +222,14 @@ def main():
         validate(val_loader, model, criterion)
         return
 
+    loc_loss = 0
+    conf_los = 0
+    epoch_size = args.batch_size #len(dataset) // args.batch_size
     for epoch in range(args.start_epoch, args.epochs):
         adjust_learning_rate(optimizer, epoch)
-
+        
+        if args.visdom and epoch != 0 and (epoch % epoch_size == 0):
+            update_vis_plot(epoch, loc_loss, conf_loss, epoch_plot, None,'append', epoch_size)
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch)
 
@@ -248,8 +269,9 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         # compute output
         output = model(input_var)
-        loss = criterion(output, target_var)
+        loss_l, loss_c  = criterion(output, target_var)
 
+        loss  =  loss_l + loss_c
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
         losses.update(loss.data[0], input.size(0))
@@ -270,7 +292,10 @@ def train(train_loader, model, criterion, optimizer, epoch):
         batch_time.update(time.time() - end)
         end = time.time()
 
-        if i % args.print_freq == 0:
+        if criterion % args.print_freq == 0:
+            if args.visdom:
+               update_vis_plot(i, loss_.data[0], loss_c.data[0],iter_plot, epoch_plot, 'append')
+            
             print('Epoch: [{0}][{1}/{2}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'Speed {3:.3f} ({4:.3f})\t'
@@ -336,6 +361,23 @@ def validate(val_loader, model, criterion):
 
     return top1.avg
 
+
+def update_vis_plot(iteration, loc, conf, window1, window2, update_type,
+                    epoch_size=1):
+    viz.line(
+        X=torch.ones((1, 3)).cpu() * iteration,
+        Y=torch.Tensor([loc, conf, loc + conf]).unsqueeze(0).cpu() / epoch_size,
+        win=window1,
+        update=update_type
+    )
+    # initialize epoch plot on first iteration
+    if iteration == 0:
+        viz.line(
+            X=torch.zeros((1, 3)).cpu(),
+            Y=torch.Tensor([loc, conf, loc + conf]).unsqueeze(0).cpu(),
+            win=window2,
+            update=True
+)
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
