@@ -2,7 +2,7 @@ import argparse
 import os
 import shutil
 import time
-
+import visdom 
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -121,8 +121,21 @@ class Net(nn.Module):
         return x
 
 def main():
+
+    vis = visdom.Visdom(env=u'train and test')
+    assert vis.check_connection()
+    vis.close()
+ 
     global args, best_prec1
     args = parser.parse_args()
+
+    loss_window = vis.line(X=torch.zeros((1,)).cpu(),
+                           Y=torch.zeros((1)).cpu(),
+                           opts=dict(xlabel='batches',
+                                     ylabel='Loss',
+                                     title='Training Loss',
+        legend=['Loss']))
+   
     
     if args.fp16:
         assert torch.backends.cudnn.enabled, "fp16 mode requires cudnn backend to be enabled."
@@ -216,12 +229,12 @@ def main():
     if args.evaluate:
         validate(val_loader, model, criterion)
         return
-
+    iterations = 0
     for epoch in range(args.start_epoch, args.epochs):
         adjust_learning_rate(optimizer, epoch)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch)
+        train(vis, loss_window, iterations, train_loader, model, criterion, optimizer, epoch)
 
         # evaluate on validation set
         prec1 = validate(val_loader, model, criterion)
@@ -238,7 +251,7 @@ def main():
         }, is_best)
 
 
-def train(train_loader, model, criterion, optimizer, epoch):
+def train(vis, loss_window,  iterations, train_loader, model, criterion, optimizer, epoch):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -279,7 +292,18 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         # measure elapsed time
         batch_time.update(time.time() - end)
-        end = time.time()
+        end = time.time() 
+        #X=torch.ones((1)).cpu() * (epoch*56 + iterations),
+        #Y=torch.Tensor([loss.data[0]]).unsqueeze(0).cpu(),
+        vis.line(X=torch.ones((1)).cpu() * (epoch*56 + iterations), 
+                 Y=torch.Tensor([loss.data[0]]).unsqueeze(0).cpu(), 
+                 #opts=dict(xlabel='minibatches',
+                 #          ylabel='Loss',
+                 #          title='Training Loss',
+                 #         legend=['Loss']),
+                 win =loss_window,#"train loss",
+                 update='append')
+        iterations = iterations +1 
 
         if i % args.print_freq == 0:
             print('Epoch: [{0}][{1}/{2}]\t'
@@ -292,7 +316,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
                    data_time=data_time, loss=losses, top1=top1, top5=top5))
 
 
-def validate(val_loader, model, criterion):
+def validate( val_loader, model, criterion):
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
@@ -321,6 +345,8 @@ def validate(val_loader, model, criterion):
         batch_time.update(time.time() - end)
         end = time.time()
 
+        #vis.line(X=torch.FloatTensor([epoch]), Y=torch.FloatTensor([loss.data[0]]), win='test', update='append' if epoch > 1 else None,
+        #     opts={'title': 'test loss'})
         if i % args.print_freq == 0:
             print('Test: [{0}/{1}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'

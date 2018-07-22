@@ -13,7 +13,7 @@ import torch.utils.data
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
-
+import visdom
 import numpy as np
 
 try:
@@ -143,6 +143,32 @@ def main():
             print(model)
         else:
             model = models.__dict__[args.arch]()
+    
+    # Setup visdom for visualization
+    if args.visdom:
+        vis = visdom.Visdom()
+        assert vis.check_connection()
+        vis.close()
+        
+        loss_window = vis.line(X=torch.zeros((1,)).cpu(),
+                           Y=torch.zeros((1)).cpu(),
+                           opts=dict(xlabel='minibatches',
+                                     ylabel='Loss',
+                                     title='Training Loss',
+        legend=['Loss']))
+
+        top1_acurracy_window = vis.line(X=torch.zeros((1,)).cpu(),
+                           Y=torch.zeros((1)).cpu(),
+                           opts=dict(xlabel='minibatches',
+                                     ylabel='accuracy',
+                                     title='Training Top1 accuracy',
+        legend=['accuracy']))
+        throughput_window = vis.line(X=torch.zeros((1,)).cpu(),
+                           Y=torch.zeros((1)).cpu(),
+                           opts=dict(xlabel='minibatches',
+                                     ylabel='images/s',
+                                     title='Training throughput',
+        legend=['throughput']))
 
     #if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
     #    model.features = torch.nn.DataParallel(model.features)
@@ -166,9 +192,9 @@ def main():
                                    static_loss_scale=args.static_loss_scale,
                                    dynamic_loss_scale=args.dynamic_loss_scale)
    
-    if args.visdom:
-        import visdom
-        viz = visdom.Visdom()
+    #if args.visdom:
+    #import visdom
+    #viz = visdom.Visdom()
 
    # optionally resume from a checkpoint
     if args.resume:
@@ -192,11 +218,11 @@ def main():
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
     
-    if args.visdom:
-        vis_title = 'Training on ImageNet ...' 
-        vis_legend = ['Loc Loss', 'Conf Loss', 'Total Loss']
-        iter_plot = create_vis_plot('Iteration', 'Loss', vis_title, vis_legend)
-        epoch_plot = create_vis_plot('Epoch', 'Loss', vis_title, vis_legend)
+    #if args.visdom:
+    #    vis_title = 'Training on ImageNet ...' 
+    #    vis_legend = ['Loc Loss', 'Conf Loss', 'Total Loss']
+    #    iter_plot = create_vis_plot('Iteration', 'Loss', vis_title, vis_legend)
+    #    epoch_plot = create_vis_plot('Epoch', 'Loss', vis_title, vis_legend)
 
     train_loader = torch.utils.data.DataLoader(
         datasets.ImageFolder(traindir, transforms.Compose([
@@ -222,16 +248,16 @@ def main():
         validate(val_loader, model, criterion)
         return
 
-    loc_loss = 0
-    conf_los = 0
+    iterations=0
+    
     epoch_size = args.batch_size #len(dataset) // args.batch_size
     for epoch in range(args.start_epoch, args.epochs):
         adjust_learning_rate(optimizer, epoch)
         
-        if args.visdom and epoch != 0 and (epoch % epoch_size == 0):
-            update_vis_plot(epoch, loc_loss, conf_loss, epoch_plot, None,'append', epoch_size)
+        #if args.visdom and epoch != 0 and (epoch % epoch_size == 0):
+        #    update_vis_plot(epoch, loc_loss, conf_loss, epoch_plot, None,'append', epoch_size)
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch)
+        train(vis, loss_window, top1_acurracy_window, throughput_window, iterations, train_loader, model, criterion, optimizer, epoch)
 
         # evaluate on validation set
         prec1 = validate(val_loader, model, criterion)
@@ -248,7 +274,7 @@ def main():
         }, is_best)
 
 
-def train(train_loader, model, criterion, optimizer, epoch):
+def train(vis,loss_window, top1_accuracy_window, throughput_window, iterations, train_loader, model, criterion, optimizer, epoch):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -257,6 +283,8 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
     # switch to train mode
     model.train()
+    
+    #iteration=0
 
     end = time.time()
     for i, (input, target) in enumerate(train_loader):
@@ -269,9 +297,9 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         # compute output
         output = model(input_var)
-        loss_l, loss_c  = criterion(output, target_var)
-
-        loss  =  loss_l + loss_c
+        loss  = criterion(output, target_var)
+        #print(loss.size())
+        #loss  =  loss_l + loss_c
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
         losses.update(loss.data[0], input.size(0))
@@ -291,10 +319,45 @@ def train(train_loader, model, criterion, optimizer, epoch):
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
+        #import time
+         #for a in range(10):
+        #viz.updateTrace(
+        #X=np.array(i),
+        #Y=np.array(loss),
+        #win=win,
+        #name="1"
+        #)
 
-        if criterion % args.print_freq == 0:
-            if args.visdom:
-               update_vis_plot(i, loss_.data[0], loss_c.data[0],iter_plot, epoch_plot, 'append')
+        #viz.updateTrace(
+        #X=np.array([a]),
+        #Y=np.array(top1.val),
+        #win=win,
+        #name="2"
+        #)
+        #time.sleep(1)
+
+        print('iterations:[{0}'.format(iterations))
+
+        if args.visdom:
+                vis.line(
+                    X=torch.ones((1)).cpu() * (epoch*56 + iterations),
+                    Y=torch.Tensor([loss.data[0]]).unsqueeze(0).cpu(),
+                    win=loss_window,update='append')
+                vis.line(
+                    X=torch.ones((1)).cpu() * (epoch*56 + iterations),
+                    Y=torch.Tensor([top1.avg]).unsqueeze(0).cpu(),
+                    win=top1_accuracy_window,update='append')
+                vis.line(
+                    X=torch.ones((1)).cpu() * (epoch*56 + iterations),
+                    Y=torch.Tensor([args.batch_size / batch_time.val]).unsqueeze(0).cpu(),
+                    win=throughput_window ,update='append')
+
+        iterations = iterations +1
+
+        if i % args.print_freq == 0:
+            #if args.visdom:
+               #print(losses)
+               #update_vis_plot(i, losses,iter_plot, epoch_plot, 'append')
             
             print('Epoch: [{0}][{1}/{2}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
@@ -362,7 +425,7 @@ def validate(val_loader, model, criterion):
     return top1.avg
 
 
-def update_vis_plot(iteration, loc, conf, window1, window2, update_type,
+def update_vis_plot(iteration, loss, window1, window2, update_type,
                     epoch_size=1):
     viz.line(
         X=torch.ones((1, 3)).cpu() * iteration,
